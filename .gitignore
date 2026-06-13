@@ -1,3 +1,4 @@
 .env
 bot
 *.exe
+docker-compose.override.yml

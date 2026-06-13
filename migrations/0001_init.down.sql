@@ -1,3 +1,4 @@
 DROP TABLE IF EXISTS matches;
 DROP TABLE IF EXISTS rounds;
 DROP TABLE IF EXISTS users;
+DROP TYPE IF EXISTS meeting_format;

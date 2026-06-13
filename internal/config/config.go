@@ -10,7 +10,13 @@ import (
 type Config struct {
 	BotToken        string `env:"BOT_TOKEN" env-required:"true"`
 	AdminTelegramID int64  `env:"ADMIN_TELEGRAM_ID" env-required:"true"`
-	DB              DBConfig
+	// MatchSchedule задаёт расписание автоматического раунда в формате "DOW HH:MM",
+	// например "MON 10:00". Если не задан, автоматический запуск отключён.
+	MatchSchedule string `env:"MATCH_SCHEDULE"`
+	// VideoCallBase — адрес публичного сервера видеовстреч (Jitsi), например
+	// "https://meet.ffmuc.net/". Если не задан, используется значение по умолчанию.
+	VideoCallBase string `env:"VIDEO_CALL_BASE"`
+	DB            DBConfig
 }
 
 type DBConfig struct {

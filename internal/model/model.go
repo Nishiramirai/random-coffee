@@ -13,14 +13,29 @@ const (
 
 // User — анкета участника сообщества.
 type User struct {
-	TelegramID      int64
-	Username        string
-	FullName        string
-	About           string
+	TelegramID int64
+	Username   string
+	// Name — имя участника (фамилия не требуется для нетворкинга).
+	Name  string
+	About string
+	// City — город участника; запрашивается при выборе офлайн-формата
+	// и используется алгоритмом для подбора пар на личную встречу.
+	City            string
 	PreferredFormat MeetingFormat
 	State           string
 	IsActive        bool
 	RegisteredAt    time.Time
+}
+
+// Pair — сформированная пара участников раунда вместе с разрешённым
+// форматом встречи. Online означает онлайн-встречу (с ссылкой RoomURL);
+// Fallback указывает, что пара собрана несмотря на несовпадение
+// предпочтений (подходящего партнёра в нужном формате/городе не нашлось).
+type Pair struct {
+	A, B     User
+	Online   bool
+	RoomURL  string
+	Fallback bool
 }
 
 // Round — раунд матчинга.

@@ -47,12 +47,12 @@ func RunMigrations(dsn string) error {
 
 // GetUser возвращает участника по Telegram ID или nil, если он не найден.
 func (s *Storage) GetUser(ctx context.Context, id int64) (*model.User, error) {
-	const q = `SELECT telegram_id, username, full_name, about,
+	const q = `SELECT telegram_id, username, name, about, city,
 	                  preferred_format, state, is_active, registered_at
 	           FROM users WHERE telegram_id = $1`
 	var u model.User
 	err := s.pool.QueryRow(ctx, q, id).Scan(&u.TelegramID, &u.Username,
-		&u.FullName, &u.About, &u.PreferredFormat, &u.State,
+		&u.Name, &u.About, &u.City, &u.PreferredFormat, &u.State,
 		&u.IsActive, &u.RegisteredAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -65,14 +65,15 @@ func (s *Storage) GetUser(ctx context.Context, id int64) (*model.User, error) {
 
 // UpsertUser создаёт или обновляет анкету участника.
 func (s *Storage) UpsertUser(ctx context.Context, u *model.User) error {
-	const q = `INSERT INTO users (telegram_id, username, full_name, about,
-	               preferred_format, state, is_active, registered_at)
-	           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	const q = `INSERT INTO users (telegram_id, username, name, about,
+	               city, preferred_format, state, is_active, registered_at)
+	           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	           ON CONFLICT (telegram_id) DO UPDATE SET
-	               username = $2, full_name = $3, about = $4,
-	               preferred_format = $5, state = $6, is_active = $7`
-	_, err := s.pool.Exec(ctx, q, u.TelegramID, u.Username, u.FullName,
-		u.About, u.PreferredFormat, u.State, u.IsActive, u.RegisteredAt)
+	               username = $2, name = $3, about = $4, city = $5,
+	               preferred_format = $6, state = $7, is_active = $8`
+	_, err := s.pool.Exec(ctx, q, u.TelegramID, u.Username, u.Name,
+		u.About, u.City, u.PreferredFormat, u.State, u.IsActive,
+		u.RegisteredAt)
 	return err
 }
 
@@ -88,11 +89,14 @@ func (s *Storage) SetActive(ctx context.Context, id int64, active bool) error {
 	return err
 }
 
-// GetActiveUsers возвращает всех участников, не находящихся на паузе.
+// GetActiveUsers возвращает участников, завершивших регистрацию
+// и не находящихся на паузе.
 func (s *Storage) GetActiveUsers(ctx context.Context) ([]model.User, error) {
-	const q = `SELECT telegram_id, username, full_name, about,
+	const q = `SELECT telegram_id, username, name, about, city,
 	                  preferred_format, state, is_active, registered_at
-	           FROM users WHERE is_active = TRUE`
+	           FROM users
+	           WHERE is_active = TRUE
+	             AND state IN ('REGISTERED_ACTIVE', 'WAITING_FEEDBACK')`
 	rows, err := s.pool.Query(ctx, q)
 	if err != nil {
 		return nil, err
@@ -102,8 +106,8 @@ func (s *Storage) GetActiveUsers(ctx context.Context) ([]model.User, error) {
 	var users []model.User
 	for rows.Next() {
 		var u model.User
-		if err := rows.Scan(&u.TelegramID, &u.Username, &u.FullName,
-			&u.About, &u.PreferredFormat, &u.State, &u.IsActive,
+		if err := rows.Scan(&u.TelegramID, &u.Username, &u.Name,
+			&u.About, &u.City, &u.PreferredFormat, &u.State, &u.IsActive,
 			&u.RegisteredAt); err != nil {
 			return nil, err
 		}
@@ -114,7 +118,7 @@ func (s *Storage) GetActiveUsers(ctx context.Context) ([]model.User, error) {
 
 // CreateRoundWithMatches сохраняет раунд и его пары в одной транзакции.
 func (s *Storage) CreateRoundWithMatches(
-	ctx context.Context, pairs [][2]model.User) (int, error) {
+	ctx context.Context, pairs []model.Pair) (int, error) {
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -135,7 +139,7 @@ func (s *Storage) CreateRoundWithMatches(
 		_, err = tx.Exec(ctx,
 			`INSERT INTO matches (round_id, user1_id, user2_id, created_at)
 			 VALUES ($1, $2, $3, $4)`,
-			roundID, p[0].TelegramID, p[1].TelegramID, time.Now())
+			roundID, p.A.TelegramID, p.B.TelegramID, time.Now())
 		if err != nil {
 			return 0, err
 		}
@@ -169,11 +173,31 @@ func (s *Storage) GetMatchHistory(
 	return hist, rows.Err()
 }
 
+// LatestPartnerID возвращает Telegram ID последнего собеседника пользователя
+// (из самого свежего матча) — для пересылки сообщений через бота.
+func (s *Storage) LatestPartnerID(
+	ctx context.Context, userID int64) (int64, bool, error) {
+	const q = `SELECT CASE WHEN user1_id = $1 THEN user2_id ELSE user1_id END
+	           FROM matches
+	           WHERE user1_id = $1 OR user2_id = $1
+	           ORDER BY created_at DESC LIMIT 1`
+	var pid int64
+	err := s.pool.QueryRow(ctx, q, userID).Scan(&pid)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return pid, true, nil
+}
+
 // Stats — агрегированная статистика сообщества.
 type Stats struct {
-	Total  int
-	Active int
-	Rounds int
+	Total       int
+	Active      int
+	Rounds      int
+	FeedbackPct float64 // доля полученных ответов обратной связи, %
 }
 
 func (s *Storage) Stats(ctx context.Context) (Stats, error) {
@@ -181,8 +205,12 @@ func (s *Storage) Stats(ctx context.Context) (Stats, error) {
 	err := s.pool.QueryRow(ctx, `SELECT
 	        (SELECT COUNT(*) FROM users),
 	        (SELECT COUNT(*) FROM users WHERE is_active),
-	        (SELECT COUNT(*) FROM rounds)`).Scan(
-		&st.Total, &st.Active, &st.Rounds)
+	        (SELECT COUNT(*) FROM rounds),
+	        COALESCE((SELECT
+	            (COUNT(feedback_u1) + COUNT(feedback_u2)) * 100.0
+	                / NULLIF(COUNT(*) * 2, 0)
+	         FROM matches), 0)`).Scan(
+		&st.Total, &st.Active, &st.Rounds, &st.FeedbackPct)
 	return st, err
 }
 
